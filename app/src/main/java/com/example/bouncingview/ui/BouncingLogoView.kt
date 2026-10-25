@@ -25,14 +25,14 @@ class BouncingLogoView @JvmOverloads constructor(
         isFakeBoldText = true
     }
 
-    private var logoText = "WINDOWS XP"
+    private var logoText = "ANDROID"
     private val textBounds = Rect()
 
     // 2. Физика
     private var x = 0f
     private var y = 0f
-    private var speedX = 15f
-    private var speedY = 15f
+    private var speedX = 7f
+    private var speedY = 7f
 
     // 3. Аниматор
     private val animator = ValueAnimator.ofFloat(0f, 1f).apply {
