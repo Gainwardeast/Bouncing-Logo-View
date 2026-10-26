@@ -6,17 +6,18 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Rect
 import android.util.AttributeSet
+import android.view.Choreographer
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import kotlin.random.Random
 
-class BouncingLogoViewSeparateThread @JvmOverloads constructor(
+class BouncingLogoNativeSurfaceView @JvmOverloads constructor(
     context: Context,
     attrs: AttributeSet? = null,
     defStyleAttr: Int = 0
-) : SurfaceView(context, attrs, defStyleAttr), SurfaceHolder.Callback {
+) : SurfaceView(context, attrs, defStyleAttr), SurfaceHolder.Callback, Choreographer.FrameCallback {
 
-    // 1. Настройки
+    // 1. Настройки отрисовки
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.RED
         textSize = 80f
@@ -31,17 +32,16 @@ class BouncingLogoViewSeparateThread @JvmOverloads constructor(
     private var y = 0f
     private var speedX = 15f
     private var speedY = 15f
+    private var lastFrameTimeNanos = 0L
 
-    // 3. Поток рендеринга
-    private var renderThread: Thread? = null
+    // 3. Управление рендерингом
+    private val choreographer = Choreographer.getInstance()
 
     @Volatile
     private var isRunning = false
 
     init {
-        // Регистрируем колбэки жизненного цикла Surface
         holder.addCallback(this)
-        // Говорим, что мы сами будем рисовать в Canvas
         setWillNotDraw(true)
         paint.getTextBounds(logoText, 0, logoText.length, textBounds)
     }
@@ -51,15 +51,13 @@ class BouncingLogoViewSeparateThread @JvmOverloads constructor(
     // ==========================================
 
     override fun surfaceCreated(holder: SurfaceHolder) {
-        // Surface готова к рисованию, запускаем поток
         isRunning = true
-        renderThread = Thread {
-            gameLoop()
-        }.apply { start() }
+        lastFrameTimeNanos = System.nanoTime()
+        // Запускаем первый кадр. Дальше Choreographer сам будет вызывать нас.
+        choreographer.postFrameCallback(this)
     }
 
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
-        // Surface изменила размер (например, поворот экрана)
         if (x == 0f && y == 0f) {
             x = width / 2f
             y = height / 2f
@@ -67,71 +65,52 @@ class BouncingLogoViewSeparateThread @JvmOverloads constructor(
     }
 
     override fun surfaceDestroyed(holder: SurfaceHolder) {
-        // Surface уничтожается, останавливаем поток
         isRunning = false
-        try {
-            renderThread?.join() // Ждем, пока поток корректно завершится
-        } catch (e: InterruptedException) {
-            e.printStackTrace()
-        }
-        renderThread = null
+        // Отписываемся от Choreographer, чтобы не было утечек
+        choreographer.removeFrameCallback(this)
     }
 
     // ==========================================
-    // ИГРОВОЙ ЦИКЛ (В фоновом потоке)
+    // ИГРОВОЙ ЦИКЛ (Вызывается Choreographer на VSync)
     // ==========================================
 
-    private fun gameLoop() {
-        var lastTime = System.nanoTime()
-        val targetFrameTime = 16_666_666L // ~16 мс (60 FPS)
+    override fun doFrame(frameTimeNanos: Long) {
+        if (!isRunning) return
 
-        while (isRunning) {
-            val now = System.nanoTime()
-            val deltaTime = now - lastTime
-            lastTime = now
+        // 1. Вычисляем deltaTime (время с прошлого кадра)
+        // Используем frameTimeNanos от Choreographer, а не System.nanoTime()
+        val deltaTimeNanos = frameTimeNanos - lastFrameTimeNanos
+        lastFrameTimeNanos = frameTimeNanos
 
-            // 1. Обновляем физику (используем deltaTime для плавности)
-            // Если кадр занял 33мс, объект сдвинется на 2 шага, чтобы не тормозить
-            val stepFactor = deltaTime / targetFrameTime
-            updatePhysics(stepFactor)
+        // Переводим наносекунды в "количество кадров по 60 FPS"
+        val stepFactor = deltaTimeNanos / 16_666_666f
 
-            // 2. Рисуем
-            drawFrame()
+        // 2. Обновляем физику
+        updatePhysics(stepFactor)
 
-            // 3. Ограничиваем FPS, чтобы не сжигать CPU впустую
-            val elapsedTime = System.nanoTime() - now
-            val sleepTime = (targetFrameTime - elapsedTime) / 1_000_000 // в мс
-            if (sleepTime > 0) {
-                try {
-                    Thread.sleep(sleepTime)
-                } catch (e: InterruptedException) {
-                    e.printStackTrace()
-                }
-            }
-        }
+        // 3. Рисуем
+        drawFrame()
+
+        // 4. Планируем следующий кадр (рекурсивно)
+        choreographer.postFrameCallback(this)
     }
 
     private fun drawFrame() {
         var canvas: Canvas? = null
         try {
-            // Блокируем Canvas (монопольный доступ)
             canvas = holder.lockCanvas()
             if (canvas != null) {
-                // Очищаем экран (так как Surface не очищается автоматически)
-                canvas.drawColor(Color.BLACK)
-
-                // Рисуем
+                canvas.drawColor(Color.BLACK) // Очищаем экран
                 canvas.drawText(logoText, x, y - textBounds.exactCenterY(), paint)
             }
         } finally {
             if (canvas != null) {
-                // Отправляем кадр на экран и освобождаем Canvas
                 holder.unlockCanvasAndPost(canvas)
             }
         }
     }
 
-    private fun updatePhysics(stepFactor: Long) {
+    private fun updatePhysics(stepFactor: Float) {
         val w = width.toFloat()
         val h = height.toFloat()
 
